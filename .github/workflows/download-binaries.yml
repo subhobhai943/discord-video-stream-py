@@ -25,22 +25,22 @@ jobs:
       - name: Download and Extract Binaries
         run: python scripts/download_binaries.py
 
-       - name: Commit and Push Binaries
-  run : |
-    git config --global user.name "github-actions[bot]"
-    git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-    git add discord_video_stream/bin/
-    if git diff --cached --quiet; then
-      echo "No changes in binaries detected. Skipping commit."
-    else
-      git commit -m "chore: update bundled cross-platform ffmpeg and yt-dlp binaries [skip ci]"
-      # Retry push up to 3 times with exponential backoff
-      for i in {1..3}; do
-        if git push; then
-          break
-        elif [ $i -lt 3 ]; then
-          echo "Push failed, retrying in $((2 ** i)) seconds..."
-          sleep $((2 ** i))
-        fi
-      done
-    fi
+      - name: Commit and Push Binaries
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add discord_video_stream/bin/
+          if git diff --cached --quiet; then
+            echo "No changes in binaries detected. Skipping commit."
+          else
+            git commit -m "chore: update bundled cross-platform ffmpeg and yt-dlp binaries [skip ci]"
+            # Retry push up to 3 times with exponential backoff
+            for i in {1..3}; do
+              if git push; then
+                break
+              elif [ $i -lt 3 ]; then
+                echo "Push failed, retrying in $((2 ** i)) seconds..."
+                sleep $((2 ** i))
+              fi
+            done
+          fi
