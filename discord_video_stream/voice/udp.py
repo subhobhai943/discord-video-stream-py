@@ -72,27 +72,42 @@ class MediaUdp:
         self._sock: socket.socket | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # Monotonically incrementing 32-bit nonce counter for encryption
+        # modes that require it (_lite, aes256_gcm).
+        self._nonce_counter: int = 0
+
         # Wall-clock anchor for A/V sync
         self._stream_start_wall: float | None = None
         self._stream_start_audio_ts: int = 0
+
+        # Background keepalive task
+        self._keepalive_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Open the UDP socket and record the stream start time."""
+        """Open the UDP socket, start the keepalive, and record the stream start time."""
         self._loop = asyncio.get_event_loop()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setblocking(False)
         self._stream_start_wall = time.monotonic()
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         log.info(
             "MediaUdp ready → %s:%d  SSRC=%d  video_SSRC=%d  mode=%s",
             self._ip, self._port, self._ssrc, self._video_ssrc, self._encryption_mode,
         )
 
     async def stop(self) -> None:
-        """Close the UDP socket."""
+        """Cancel the keepalive and close the UDP socket."""
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+            self._keepalive_task = None
         if self._sock:
             self._sock.close()
             self._sock = None
@@ -114,8 +129,12 @@ class MediaUdp:
             timestamp=self._audio_ts,
             ssrc=self._ssrc,
         )
-        packet = encrypt_packet(header, opus_frame, self._secret_key, self._encryption_mode)
+        packet = encrypt_packet(
+            header, opus_frame, self._secret_key,
+            self._encryption_mode, nonce_counter=self._nonce_counter,
+        )
         await self._send_raw(packet)
+        self._nonce_counter = (self._nonce_counter + 1) & 0xFFFFFFFF
 
         self._audio_seq = (self._audio_seq + 1) & 0xFFFF
         self._audio_ts  = (self._audio_ts + AUDIO_SAMPLES_PER_FRAME) & 0xFFFFFFFF
@@ -170,11 +189,30 @@ class MediaUdp:
                 width=frame_width  if include_ext else 0,
                 height=frame_height if include_ext else 0,
             )
-            packet = encrypt_packet(header, payload, self._secret_key, self._encryption_mode)
+            packet = encrypt_packet(
+                header, payload, self._secret_key,
+                self._encryption_mode, nonce_counter=self._nonce_counter,
+            )
             await self._send_raw(packet)
+            self._nonce_counter = (self._nonce_counter + 1) & 0xFFFFFFFF
             self._video_seq = (self._video_seq + 1) & 0xFFFF
 
         self._video_ts = (self._video_ts + self._video_ts_increment) & 0xFFFFFFFF
+
+    # ------------------------------------------------------------------
+    # Speaking
+    # ------------------------------------------------------------------
+
+    async def send_speaking(self, speaking: bool) -> None:
+        """
+        Placeholder for speaking state.
+
+        Actual speaking updates are sent via the voice gateway (OP 5),
+        not over the UDP socket.  This method exists so callers have a
+        consistent interface; the real implementation lives in the
+        gateway layer.
+        """
+        log.debug("send_speaking(%s) — handled by voice gateway OP 5", speaking)
 
     # ------------------------------------------------------------------
     # Internal
@@ -184,6 +222,27 @@ class MediaUdp:
         if self._sock is None:
             raise RuntimeError("MediaUdp not started — call start() first.")
         await self._loop.sock_sendto(self._sock, data, (self._ip, self._port))
+
+    async def _keepalive_loop(self) -> None:
+        """
+        Send 8 null bytes every 5 seconds to keep the NAT mapping alive.
+
+        Discord voice servers expect periodic UDP traffic even when no
+        media is being sent; without it the connection may be dropped.
+        """
+        _KEEPALIVE_INTERVAL = 5.0
+        _KEEPALIVE_PAYLOAD = b"\x00" * 8
+        log.debug("UDP keepalive loop started (every %.1fs)", _KEEPALIVE_INTERVAL)
+        try:
+            while True:
+                await asyncio.sleep(_KEEPALIVE_INTERVAL)
+                try:
+                    await self._send_raw(_KEEPALIVE_PAYLOAD)
+                except Exception:
+                    log.warning("UDP keepalive send failed", exc_info=True)
+        except asyncio.CancelledError:
+            log.debug("UDP keepalive loop cancelled")
+            raise
 
     # ------------------------------------------------------------------
     # Properties

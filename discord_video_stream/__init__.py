@@ -14,6 +14,8 @@ Public API surface:
 from .streamer import Streamer
 from .media.player import VideoPlayer
 from .enums import Codec, StreamType, Resolution
+from .voice.client import VoiceStreamClient
 
 __version__ = "0.1.0"
-__all__ = ["Streamer", "VideoPlayer", "Codec", "StreamType", "Resolution"]
+__all__ = ["Streamer", "VideoPlayer", "Codec", "StreamType", "Resolution", "VoiceStreamClient"]
+

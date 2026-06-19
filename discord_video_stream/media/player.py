@@ -64,15 +64,27 @@ class MediaPlayer:
         self._paused      = False
         self._stop_event  = asyncio.Event()
         self._frame_duration = 1.0 / fps  # seconds per frame for pacing
+        self._frame_count    = 0
+        self._progress_callback: Callable[..., Coroutine[Any, Any, None]] | None = None
+
+    @property
+    def elapsed_seconds(self) -> float:
+        """Return approximate elapsed playback time based on frames sent."""
+        return self._frame_count / self._fps
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    async def play(self) -> None:
+    async def play(
+        self,
+        progress_callback: Callable[..., Coroutine[Any, Any, None]] | None = None,
+    ) -> None:
         """
         Resolve the source, spawn FFmpeg, stream until finished or stopped.
         """
+        self._progress_callback = progress_callback
+        self._frame_count = 0
         source = await resolve_url(self._source)
         ffmpeg = await spawn_ffmpeg(
             source,
@@ -119,9 +131,52 @@ class MediaPlayer:
         log.info("Player stopped.")
 
     async def seek(self, seconds: float) -> None:
-        """Seek to *seconds* by restarting FFmpeg with ``-ss``."""
-        # Phase 4 implementation
-        raise NotImplementedError("seek() will be implemented in Phase 4")
+        """Seek to *seconds* by restarting FFmpeg with ``-ss`` offset.
+
+        Stops the current FFmpeg process and video/audio tasks, then
+        respawns FFmpeg at the requested position and restarts the
+        streaming loops.
+
+        Parameters
+        ----------
+        seconds:
+            Target position in seconds from the start of the media.
+        """
+        log.info("Seeking to %.2f s", seconds)
+
+        # 1. Cancel running tasks
+        for task in (self._video_task, self._audio_task):
+            if task:
+                task.cancel()
+
+        # 2. Kill existing FFmpeg process
+        await self._cleanup()
+
+        # 3. Reset stop event so the new loops don't exit immediately
+        self._stop_event.clear()
+
+        # 4. Respawn FFmpeg with seek offset
+        source = await resolve_url(self._source)
+        ffmpeg = await spawn_ffmpeg(
+            source,
+            width=self._width,
+            height=self._height,
+            fps=self._fps,
+            codec=self._codec,
+            video_bitrate=self._video_bitrate,
+            audio_bitrate=self._audio_bitrate,
+            seek_offset=seconds,
+        )
+        self._process = ffmpeg.process
+        log.info("FFmpeg respawned at %.2f s (PID %d)", seconds, self._process.pid)
+
+        # 5. Restart streaming loops
+        self._video_task = asyncio.create_task(
+            self._video_loop(ffmpeg.video_reader), name="video-loop"
+        )
+        self._audio_task = asyncio.create_task(
+            self._audio_loop(ffmpeg.audio_reader), name="audio-loop"
+        )
 
     # ------------------------------------------------------------------
     # Video loop
@@ -151,6 +206,13 @@ class MediaPlayer:
                             width=self._width,
                             height=self._height,
                         )
+
+                    self._frame_count += 1
+                    if (
+                        self._progress_callback is not None
+                        and self._frame_count % self._fps == 0
+                    ):
+                        await self._progress_callback(self.elapsed_seconds)
 
                     # Pace to target fps using wall clock
                     await self._pace_frame(frame_start)
@@ -182,6 +244,14 @@ class MediaPlayer:
                         width=self._width,
                         height=self._height,
                     )
+
+                self._frame_count += 1
+                if (
+                    self._progress_callback is not None
+                    and self._frame_count % self._fps == 0
+                ):
+                    await self._progress_callback(self.elapsed_seconds)
+
                 await self._pace_frame(frame_start)
                 frame_start = time.monotonic()
         except (asyncio.CancelledError, asyncio.IncompleteReadError):
@@ -313,8 +383,12 @@ class VideoPlayer:
     async def play(self) -> None:
         """Start playback. Fires ``start`` then ``finish`` events."""
         await self._emit("start")
+
+        async def _on_progress(elapsed: float) -> None:
+            await self._emit("progress", elapsed)
+
         try:
-            await self._player.play()
+            await self._player.play(progress_callback=_on_progress)
         except Exception as exc:
             await self._emit("error", exc)
             raise

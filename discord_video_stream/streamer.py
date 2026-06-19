@@ -37,6 +37,7 @@ class Streamer:
         self._client  = client
         self._gateway: VoiceGateway | None = None
         self._udp:     MediaUdp     | None = None
+        self._voice_client: VoiceStreamClient | None = None
 
     # ------------------------------------------------------------------
     # Voice channel lifecycle
@@ -55,14 +56,37 @@ class Streamer:
         The client must already be connected to the Discord gateway.
         """
         log.info("Joining voice channel %d in guild %d", channel_id, guild_id)
-        await self._client.ws.voice_state(
-            guild_id, channel_id,
-            self_mute=self_mute, self_deaf=self_deaf,
-        )
-        self._voice_state, self._voice_server = await asyncio.gather(
-            self._wait_for_voice_state(guild_id),
-            self._wait_for_voice_server(guild_id),
-        )
+
+        if self._voice_client:
+            try:
+                await self._voice_client.disconnect(force=True)
+            except Exception:
+                pass
+            self._voice_client = None
+
+        guild = self._client.get_guild(guild_id)
+        channel = self._client.get_channel(channel_id) if guild else None
+
+        if guild is not None and channel is not None:
+            from .voice.client import VoiceStreamClient
+            self._voice_client = await channel.connect(
+                cls=VoiceStreamClient,
+                self_mute=self_mute,
+                self_deaf=self_deaf,
+            )
+            # Sync for backward compatibility
+            self._voice_state = self._voice_client._voice_state
+            self._voice_server = self._voice_client._voice_server
+        else:
+            log.warning("Guild or channel not found in cache. Falling back to raw voice state join.")
+            await self._client.ws.voice_state(
+                guild_id, channel_id,
+                self_mute=self_mute, self_deaf=self_deaf,
+            )
+            self._voice_state, self._voice_server = await asyncio.gather(
+                self._wait_for_voice_state(guild_id),
+                self._wait_for_voice_server(guild_id),
+            )
         log.debug("Voice state : %s", self._voice_state)
         log.debug("Voice server: %s", self._voice_server)
 
@@ -106,6 +130,16 @@ class Streamer:
         stream_type:
             ``"go_live"`` (default) or ``"webcam"``.
         """
+        if self._voice_client is not None:
+            self._udp = await self._voice_client.create_stream(
+                resolution=resolution,
+                fps=fps,
+                codec=codec,
+                stream_type=stream_type,
+            )
+            self._gateway = self._voice_client._gateway
+            return self._udp
+
         if not hasattr(self, "_voice_state"):
             raise RuntimeError("Call join_voice() before create_stream().")
 
@@ -149,6 +183,8 @@ class Streamer:
 
     async def stop_stream(self) -> None:
         """Stop the active stream and clean up all resources."""
+        if self._voice_client:
+            await self._voice_client.stop_stream()
         if self._udp:
             await self._udp.stop()
             self._udp = None
@@ -160,5 +196,10 @@ class Streamer:
     async def leave_voice(self, guild_id: int) -> None:
         """Leave the voice channel and clean up."""
         await self.stop_stream()
-        await self._client.ws.voice_state(guild_id, None)
+        if self._voice_client:
+            await self._voice_client.disconnect(force=True)
+            self._voice_client = None
+        else:
+            await self._client.ws.voice_state(guild_id, None)
         log.info("Left voice channel in guild %d", guild_id)
+

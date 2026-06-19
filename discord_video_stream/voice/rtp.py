@@ -15,11 +15,13 @@ RTP header layout (RFC 3550, 12 bytes)::
 Discord video extension header (appended after 12-byte base header
 when X=1, used for video metadata)::
 
-  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-  |  0xBE  |  0xDE  |          length (# of 32-bit words)         |
-  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-  |  id=5  |  len=2 |  rotation   |   width (px, /4)  |   height  |
-  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  0xBE  |  0xDE  |        length = 2 (32-bit words)            |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  id=5  |  len=5 |        rotation (16-bit BE)                 |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |          width (16-bit BE)    |        height (16-bit BE)     |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 Discord audio payload type : 0x78 (120)
 Discord H264  payload type : 0x65 (101)
@@ -131,24 +133,27 @@ def build_video_rtp_header(
         return base
 
     # One-byte extension header (RFC 5285)
-    # profile=0xBEDE, length=1 (one 32-bit word of extension data)
-    # Extension element: id=5, len=2 (3 bytes data), then 3 data bytes:
-    #   byte0 = rotation, byte1 = width // 4, byte2 = height // 4
-    ext_data = struct.pack(
+    # profile=0xBEDE, length=2 (two 32-bit words of extension data)
+    # Extension element: id=5, len=5 (6 bytes data):
+    #   rotation (16-bit BE), width (16-bit BE), height (16-bit BE)
+    # Plus 1 byte padding to align to 32-bit boundary.
+    ext_header = struct.pack(
         ">HH",
         EXTENSION_PROFILE,  # 0xBEDE
-        1,                  # number of 32-bit words that follow
+        2,                  # number of 32-bit words that follow
     )
-    # id=5 (4 bits), len=2 meaning 3 bytes data (4 bits), then 3 data bytes, 1 pad
-    elem_id_len = (5 << 4) | 2   # id=5, len=2 => 3 bytes
+    # id=5 (4 bits), len=5 meaning 6 bytes data (4 bits)
+    elem_id_len = (5 << 4) | 5   # id=5, len=5 => 6 bytes
     ext_payload = struct.pack(
-        ">BBBB",
+        ">BHHH",
         elem_id_len,
-        rotation & 0xFF,
-        (width  // 4) & 0xFF,
-        (height // 4) & 0xFF,
+        rotation & 0xFFFF,
+        width    & 0xFFFF,
+        height   & 0xFFFF,
     )
-    return base + ext_data + ext_payload
+    # 1 byte padding to reach 8-byte (2-word) alignment
+    ext_payload += b"\x00"
+    return base + ext_header + ext_payload
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ The raw output is a stream of length-prefixed Opus frames.
 
 from __future__ import annotations
 
+import asyncio
 import struct
 from typing import AsyncGenerator
 

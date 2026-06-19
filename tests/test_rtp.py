@@ -80,8 +80,8 @@ def test_video_header_extension_present():
     )
     p = parse_rtp_header(h)
     assert p["extension"] is True
-    # Total length: 12 (base) + 4 (ext header) + 4 (ext payload) = 20
-    assert len(h) == 20
+    # Total length: 12 (base) + 4 (ext header) + 8 (ext payload) = 24
+    assert len(h) == 24
 
 
 def test_video_header_extension_profile():
@@ -100,6 +100,7 @@ def test_video_header_extension_dimensions():
         width=1280, height=720,
     )
     # Extension payload starts at byte 16
-    # byte 16 = id/len, 17 = rotation, 18 = width//4, 19 = height//4
-    assert h[18] == 1280 // 4   # 320
-    assert h[19] == 720  // 4   # 180
+    # byte 16 = id/len (0x55), bytes 17-18 = rotation (16-bit BE),
+    # bytes 19-20 = width (16-bit BE), bytes 21-22 = height (16-bit BE)
+    assert struct.unpack_from(">H", h, 19)[0] == 1280
+    assert struct.unpack_from(">H", h, 21)[0] == 720

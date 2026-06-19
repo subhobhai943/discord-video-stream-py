@@ -29,6 +29,21 @@ from ..enums import Codec, Resolution
 log = logging.getLogger(__name__)
 
 
+def _parse_bitrate_to_kbits(bitrate_str: str) -> int:
+    """Convert a bitrate string like '2M', '2500K', '500k', '2m' to kilobits."""
+    s = bitrate_str.strip()
+    if not s:
+        raise ValueError("Empty bitrate string")
+    suffix = s[-1].upper()
+    if suffix == 'M':
+        return int(float(s[:-1]) * 1000)
+    elif suffix == 'K':
+        return int(float(s[:-1]))
+    else:
+        # No suffix — assume raw bits per second, convert to kilobits.
+        return int(float(s) / 1000)
+
+
 class FFmpegProcess(NamedTuple):
     """Holds the spawned process and its stdout pipe handles."""
     process: asyncio.subprocess.Process
@@ -46,6 +61,7 @@ async def spawn_ffmpeg(
     video_bitrate: str = "2M",
     audio_bitrate: str = "128k",
     realtime: bool = True,
+    seek_offset: float = 0.0,
 ) -> FFmpegProcess:
     """
     Spawn an FFmpeg subprocess and return :class:`FFmpegProcess` with async
@@ -68,6 +84,9 @@ async def spawn_ffmpeg(
     realtime:
         Whether to add ``-re`` flag (read at native frame rate).
         Set ``False`` for pipe sources.
+    seek_offset:
+        If > 0, passed as ``-ss`` *before* ``-i`` for fast input seeking.
+        Value is in seconds (e.g. 90.5 for 1 min 30.5 s).
     """
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
@@ -82,34 +101,39 @@ async def spawn_ffmpeg(
 
     cmd = [ffmpeg_bin]
 
+    if seek_offset > 0:
+        cmd += ["-ss", str(seek_offset)]
+
     if realtime:
         cmd += ["-re"]
 
-    cmd += ["-i", source]
+    cmd += ["-loglevel", "quiet", "-i", source]
 
     # Video output pipe (pipe:1)
+    bufsize_kbits = _parse_bitrate_to_kbits(video_bitrate) * 2
     cmd += [
         "-map", "0:v:0",
         "-c:v", video_encoder,
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        "-x264opts", "keyint=60:min-keyint=60:no-scenecut",  # ignored for vp8
+    ]
+    if codec == Codec.H264:
+        cmd += [
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-x264opts", "keyint=60:min-keyint=60:no-scenecut",
+        ]
+    cmd += [
         "-b:v", video_bitrate,
         "-maxrate", video_bitrate,
-        "-bufsize", str(int(video_bitrate.rstrip("MK")) * 2)
-            + ("M" if "M" in video_bitrate else "K"),
+        "-bufsize", f"{bufsize_kbits}K",
         "-vf", scale_filter,
         "-r", str(fps),
         "-f", video_format,
         "pipe:1",
     ]
 
-    # Audio output pipe (pipe:2) via stderr fd trick — actually use pipe:2 via subprocess
-    # We use stdout for video, stderr for audio to avoid mixing.
-    # In practice, FFmpeg writes video to stdout (1) and we parse audio from stderr (2).
-    # For a cleaner split, you can use named pipes or fd=3/4 with asyncio open_connection.
-    # For now, we use a single pipe approach: video on stdout, audio on a separate process.
-    # TODO: Phase 4 — use fd-based multiplexed pipes for simultaneous A+V.
+    # NOTE: Audio is sent through pipe:2 (stderr) while video uses pipe:1
+    # (stdout).  FFmpeg's diagnostic output is suppressed with -loglevel quiet
+    # so that log messages do not corrupt the raw audio stream on stderr.
     cmd += [
         "-map", "0:a:0",
         "-ac", "2",
