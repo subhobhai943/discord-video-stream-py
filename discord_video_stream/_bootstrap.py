@@ -1,13 +1,20 @@
 """Bootstrap module: lazy-downloads ffmpeg and yt-dlp for the current
 platform/architecture on first use. Nothing is bundled in the package.
 
+This module is intentionally import-safe: importing it never triggers a
+download. Downloads happen only when ``get_ffmpeg_path()`` or
+``get_ytdlp_path()`` are called for the first time and the binary is absent.
+
 Public API
 ----------
-ensure_binaries(verbose=True)  -- download if missing (idempotent)
-get_ffmpeg_path()              -- absolute path to ffmpeg binary
-get_ytdlp_path()               -- absolute path to yt-dlp binary
+ensure_binaries(verbose=True)  -- download if missing (idempotent, safe to call multiple times)
+get_ffmpeg_path()              -- absolute path to ffmpeg binary (downloads if needed)
+get_ytdlp_path()               -- absolute path to yt-dlp binary (downloads if needed)
 """
 
+from __future__ import annotations
+
+import logging
 import os
 import platform
 import shutil
@@ -15,6 +22,8 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
+
+log = logging.getLogger(__name__)
 
 BIN_DIR = os.path.join(os.path.dirname(__file__), "bin")
 
@@ -25,7 +34,7 @@ USER_AGENT = (
 )
 
 # (ffmpeg_url, archive_type, ffmpeg_filename, ytdlp_url, ytdlp_filename)
-SOURCES = {
+SOURCES: dict[str, dict] = {
     "windows-x64": {
         "ffmpeg": (
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
@@ -84,7 +93,8 @@ SOURCES = {
 }
 
 
-def _get_platform_key() -> str:
+def get_platform_key() -> str:
+    """Detect the current platform/arch key used in SOURCES and bin/ layout."""
     system = platform.system().lower()
     machine = platform.machine().lower()
     if system == "windows":
@@ -102,10 +112,11 @@ def _get_platform_key() -> str:
 def ensure_binaries(verbose: bool = True) -> None:
     """Download ffmpeg + yt-dlp for the current platform if not already present.
 
-    This is idempotent — calling it multiple times is safe and fast once
-    the binaries are already on disk.
+    Safe to call multiple times — exits instantly if both binaries exist.
+    Does NOT run automatically on import; called lazily by get_ffmpeg_path()
+    and get_ytdlp_path().
     """
-    key = _get_platform_key()
+    key = get_platform_key()
     plat_dir = os.path.join(BIN_DIR, key)
     os.makedirs(plat_dir, exist_ok=True)
 
@@ -115,19 +126,55 @@ def ensure_binaries(verbose: bool = True) -> None:
 
 
 def get_ffmpeg_path() -> str:
-    """Return the absolute path to the ffmpeg binary, downloading it if needed."""
-    ensure_binaries(verbose=False)
-    key = _get_platform_key()
+    """Return the absolute path to the ffmpeg binary.
+
+    Downloads the binary on first call if not already present.
+    Falls back to the system PATH if the download fails.
+    """
+    key = get_platform_key()
+    plat_dir = os.path.join(BIN_DIR, key)
     fname = SOURCES[key]["ffmpeg"][2]
-    return os.path.join(BIN_DIR, key, fname)
+    dest = os.path.join(plat_dir, fname)
+
+    if not os.path.isfile(dest):
+        try:
+            os.makedirs(plat_dir, exist_ok=True)
+            _ensure_ffmpeg(plat_dir, SOURCES[key]["ffmpeg"], key, verbose=True)
+        except Exception as exc:
+            log.warning("Could not download ffmpeg binary: %s. Falling back to PATH.", exc)
+            system_path = shutil.which("ffmpeg")
+            if system_path:
+                return system_path
+            raise RuntimeError(
+                "ffmpeg not found. Install it with:\n"
+                "  Linux : sudo apt install ffmpeg\n"
+                "  macOS : brew install ffmpeg\n"
+                "  Windows: https://ffmpeg.org/download.html"
+            ) from exc
+
+    return dest
 
 
-def get_ytdlp_path() -> str:
-    """Return the absolute path to the yt-dlp binary, downloading it if needed."""
-    ensure_binaries(verbose=False)
-    key = _get_platform_key()
+def get_ytdlp_path() -> str | None:
+    """Return the absolute path to the yt-dlp binary.
+
+    Downloads the binary on first call if not already present.
+    Falls back to the system PATH. Returns None if unavailable.
+    """
+    key = get_platform_key()
+    plat_dir = os.path.join(BIN_DIR, key)
     fname = SOURCES[key]["ytdlp"][1]
-    return os.path.join(BIN_DIR, key, fname)
+    dest = os.path.join(plat_dir, fname)
+
+    if not os.path.isfile(dest):
+        try:
+            os.makedirs(plat_dir, exist_ok=True)
+            _ensure_ytdlp(plat_dir, SOURCES[key]["ytdlp"], key, verbose=True)
+        except Exception as exc:
+            log.warning("Could not download yt-dlp binary: %s. Falling back to PATH.", exc)
+            return shutil.which("yt-dlp")
+
+    return dest
 
 
 # ---------------------------------------------------------------------------

@@ -9,19 +9,18 @@ Public API surface:
     Codec             -- enum for H264 / VP8
     StreamType        -- enum for GoLive / Webcam
     Resolution        -- preset helper
-    get_ffmpeg_path() -- path to the bundled ffmpeg binary (auto-downloaded)
-    get_ytdlp_path()  -- path to the bundled yt-dlp binary (auto-downloaded)
+    get_ffmpeg_path() -- path to ffmpeg binary (auto-downloaded on first call)
+    get_ytdlp_path()  -- path to yt-dlp binary (auto-downloaded on first call)
+
+Binaries are downloaded lazily on first use — never at import time.
+This keeps imports fast and safe in offline / restricted environments.
 """
 
-from ._bootstrap import ensure_binaries, get_ffmpeg_path, get_ytdlp_path
 from .streamer import Streamer
 from .media.player import VideoPlayer
 from .enums import Codec, StreamType, Resolution
 from .voice.client import VoiceStreamClient
-
-# Download ffmpeg + yt-dlp for the current platform on first import.
-# Subsequent imports are instant (files already exist on disk).
-ensure_binaries()
+from ._bootstrap import ensure_binaries, get_ffmpeg_path, get_ytdlp_path
 
 __version__ = "0.1.0"
 __all__ = [
@@ -31,6 +30,7 @@ __all__ = [
     "StreamType",
     "Resolution",
     "VoiceStreamClient",
+    "ensure_binaries",
     "get_ffmpeg_path",
     "get_ytdlp_path",
 ]
