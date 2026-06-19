@@ -26,6 +26,10 @@ dependencies = [
     "discord.py-self>=2.0",
     "PyNaCl>=1.5",
     "cryptography>=41.0",
+    # yt-dlp pip package for Python-level API usage.
+    # _bootstrap.py additionally downloads the standalone yt-dlp binary
+    # for direct subprocess calls (ffmpeg is handled the same way).
+    "yt-dlp>=2024.1.0",
     "websockets>=12.0",
 ]
 
