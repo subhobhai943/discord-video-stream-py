@@ -11,16 +11,14 @@ from .voice.gateway import VoiceGateway
 from .voice.udp import MediaUdp
 
 if TYPE_CHECKING:
-    import discord  # discord.py-self
+    import discord
 
 log = logging.getLogger(__name__)
 
 
 class Streamer:
     """
-    Wraps a ``discord.py-self`` Client and manages the full streaming lifecycle:
-    joining a voice channel, negotiating the voice gateway, and exposing
-    a :class:`MediaUdp` to feed encoded media packets.
+    Wraps a ``discord.py-self`` Client and manages the full streaming lifecycle.
 
     Example::
 
@@ -36,9 +34,9 @@ class Streamer:
     """
 
     def __init__(self, client: "discord.Client") -> None:
-        self._client = client
+        self._client  = client
         self._gateway: VoiceGateway | None = None
-        self._udp: MediaUdp | None = None
+        self._udp:     MediaUdp     | None = None
 
     # ------------------------------------------------------------------
     # Voice channel lifecycle
@@ -54,28 +52,21 @@ class Streamer:
     ) -> None:
         """
         Send a Voice State Update to join *channel_id* in *guild_id*.
-
-        The client must already be connected to the Discord gateway before
-        calling this method.
+        The client must already be connected to the Discord gateway.
         """
         log.info("Joining voice channel %d in guild %d", channel_id, guild_id)
-        # discord.py-self exposes this via the underlying connection
         await self._client.ws.voice_state(
-            guild_id,
-            channel_id,
-            self_mute=self_mute,
-            self_deaf=self_deaf,
+            guild_id, channel_id,
+            self_mute=self_mute, self_deaf=self_deaf,
         )
-        # Wait for VOICE_STATE_UPDATE + VOICE_SERVER_UPDATE events
         self._voice_state, self._voice_server = await asyncio.gather(
             self._wait_for_voice_state(guild_id),
             self._wait_for_voice_server(guild_id),
         )
-        log.debug("Voice state received: %s", self._voice_state)
-        log.debug("Voice server received: %s", self._voice_server)
+        log.debug("Voice state : %s", self._voice_state)
+        log.debug("Voice server: %s", self._voice_server)
 
     async def _wait_for_voice_state(self, guild_id: int) -> dict:
-        """Wait for VOICE_STATE_UPDATE for our own user in the given guild."""
         def check(data: dict) -> bool:
             return (
                 data.get("guild_id") == str(guild_id)
@@ -84,7 +75,6 @@ class Streamer:
         return await self._client.wait_for("voice_state_update_raw", check=check)
 
     async def _wait_for_voice_server(self, guild_id: int) -> dict:
-        """Wait for VOICE_SERVER_UPDATE for the given guild."""
         def check(data: dict) -> bool:
             return data.get("guild_id") == str(guild_id)
         return await self._client.wait_for("voice_server_update", check=check)
@@ -102,28 +92,25 @@ class Streamer:
         stream_type: str | StreamType = StreamType.GO_LIVE,
     ) -> MediaUdp:
         """
-        Negotiate the voice gateway (OP 0→2→1→4→18) and return a
+        Run the voice gateway handshake (OP 0→8→0→2→1→4→18) and return a
         :class:`MediaUdp` ready to receive encrypted RTP packets.
 
         Parameters
         ----------
         resolution:
-            Target resolution. Accepts a :class:`Resolution` enum or a string
-            like ``"720p"``.
+            Target resolution: ``"480p"``, ``"720p"``, ``"1080p"``, ``"source"``.
         fps:
-            Target frames per second (15, 30, 60).
+            Frames per second (15, 30, 60).
         codec:
-            Video codec — ``"h264"`` or ``"vp8"``.
+            ``"h264"`` (default) or ``"vp8"``.
         stream_type:
             ``"go_live"`` (default) or ``"webcam"``.
         """
         if not hasattr(self, "_voice_state"):
-            raise RuntimeError(
-                "Call join_voice() before create_stream()."
-            )
+            raise RuntimeError("Call join_voice() before create_stream().")
 
-        res = Resolution(resolution) if isinstance(resolution, str) else resolution
-        codec = Codec(codec) if isinstance(codec, str) else codec
+        res         = Resolution(resolution) if isinstance(resolution, str) else resolution
+        codec       = Codec(codec)           if isinstance(codec, str)       else codec
         stream_type = StreamType(stream_type) if isinstance(stream_type, str) else stream_type
 
         width, height = res.dimensions()
@@ -137,12 +124,9 @@ class Streamer:
             token=self._voice_server["token"],
         )
 
-        udp_ip, udp_port, ssrc, secret_key, encryption_mode = await self._gateway.connect(
-            width=width,
-            height=height,
-            fps=fps,
-            codec=codec,
-            stream_type=stream_type,
+        udp_ip, udp_port, ssrc, secret_key, enc_mode = await self._gateway.connect(
+            width=width, height=height, fps=fps,
+            codec=codec, stream_type=stream_type,
         )
 
         self._udp = MediaUdp(
@@ -150,7 +134,11 @@ class Streamer:
             port=udp_port,
             ssrc=ssrc,
             secret_key=secret_key,
-            encryption_mode=encryption_mode,
+            encryption_mode=enc_mode,
+            codec=codec,
+            fps=fps,
+            width=width,
+            height=height,
         )
         await self._udp.start()
         return self._udp
@@ -160,7 +148,7 @@ class Streamer:
     # ------------------------------------------------------------------
 
     async def stop_stream(self) -> None:
-        """Stop the current stream and clean up all resources."""
+        """Stop the active stream and clean up all resources."""
         if self._udp:
             await self._udp.stop()
             self._udp = None

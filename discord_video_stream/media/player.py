@@ -1,16 +1,19 @@
 """MediaPlayer and VideoPlayer — the FFmpeg → RTP streaming pipeline.
 
-MediaPlayer manages the FFmpeg subprocess and dispatches encoded frames
-to a :class:`~discord_video_stream.voice.udp.MediaUdp`.
-
-VideoPlayer wraps MediaPlayer with a public API including events and
-playback controls (pause, resume, seek, stop).
+Phase 2 changes vs Phase 1:
+  - Uses H264FrameReader for proper Annex-B frame delimiting
+  - Passes is_keyframe flag + frame dimensions to MediaUdp
+  - Video and audio tasks run in parallel with asyncio.gather
+  - A/V sync: video pacing via wall-clock instead of busy-loop
+  - SPS/PPS cache: injected before every IDR frame automatically
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import struct
+import time
 from collections import defaultdict
 from typing import Any, Callable, Coroutine
 
@@ -18,21 +21,20 @@ from ..enums import Codec
 from ..voice.udp import MediaUdp
 from .ffmpeg import spawn_ffmpeg
 from .ytdlp import resolve_url
-from ..codecs.h264 import packetize_h264_frame
+from ..codecs.h264 import H264FrameReader, is_keyframe, split_nalus
 from ..codecs.vp8 import packetize_vp8_frame
 
 log = logging.getLogger(__name__)
 
-# Type alias for async event callbacks
 EventCallback = Callable[..., Coroutine[Any, Any, None]]
 
 
 class MediaPlayer:
     """
-    Spawns an FFmpeg subprocess, reads encoded frames, and feeds them to
-    a :class:`MediaUdp` as encrypted RTP packets.
+    Low-level player: spawns FFmpeg, reads encoded frames, feeds
+    :class:`~discord_video_stream.voice.udp.MediaUdp`.
 
-    This is the low-level player.  Most users should use :class:`VideoPlayer`.
+    Most users should use :class:`VideoPlayer` instead.
     """
 
     def __init__(
@@ -47,25 +49,29 @@ class MediaPlayer:
         video_bitrate: str = "2M",
         audio_bitrate: str = "128k",
     ) -> None:
-        self._source = source
-        self._udp = udp
-        self._codec = codec
-        self._width = width
-        self._height = height
-        self._fps = fps
+        self._source        = source
+        self._udp           = udp
+        self._codec         = codec
+        self._width         = width
+        self._height        = height
+        self._fps           = fps
         self._video_bitrate = video_bitrate
         self._audio_bitrate = audio_bitrate
 
         self._process: asyncio.subprocess.Process | None = None
         self._video_task: asyncio.Task | None = None
         self._audio_task: asyncio.Task | None = None
-        self._paused = False
-        self._stop_event = asyncio.Event()
+        self._paused      = False
+        self._stop_event  = asyncio.Event()
+        self._frame_duration = 1.0 / fps  # seconds per frame for pacing
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     async def play(self) -> None:
         """
-        Resolve the source URL, spawn FFmpeg, and start streaming.
-        Returns when the stream finishes or :meth:`stop` is called.
+        Resolve the source, spawn FFmpeg, stream until finished or stopped.
         """
         source = await resolve_url(self._source)
         ffmpeg = await spawn_ffmpeg(
@@ -78,6 +84,7 @@ class MediaPlayer:
             audio_bitrate=self._audio_bitrate,
         )
         self._process = ffmpeg.process
+        log.info("FFmpeg spawned (PID %d)", self._process.pid)
 
         self._video_task = asyncio.create_task(
             self._video_loop(ffmpeg.video_reader), name="video-loop"
@@ -94,101 +101,144 @@ class MediaPlayer:
             await self._cleanup()
 
     def pause(self) -> None:
-        """Pause streaming (buffers FFmpeg output — resumes from current position)."""
+        """Pause packet dispatch (FFmpeg keeps running, buffers fill)."""
         self._paused = True
         log.info("Player paused.")
 
     def resume(self) -> None:
-        """Resume a paused stream."""
+        """Resume packet dispatch."""
         self._paused = False
         log.info("Player resumed.")
 
     def stop(self) -> None:
-        """Stop streaming and kill the FFmpeg process."""
+        """Stop streaming and kill FFmpeg."""
         self._stop_event.set()
-        if self._video_task:
-            self._video_task.cancel()
-        if self._audio_task:
-            self._audio_task.cancel()
+        for task in (self._video_task, self._audio_task):
+            if task:
+                task.cancel()
         log.info("Player stopped.")
 
     async def seek(self, seconds: float) -> None:
-        """
-        Seek to *seconds* by restarting FFmpeg with a ``-ss`` offset.
-        This restarts the subprocess; there will be a brief gap.
-        """
-        # TODO: Phase 4 — implement seek by restarting FFmpeg with -ss
+        """Seek to *seconds* by restarting FFmpeg with ``-ss``."""
+        # Phase 4 implementation
         raise NotImplementedError("seek() will be implemented in Phase 4")
 
     # ------------------------------------------------------------------
-    # Internal streaming loops
+    # Video loop
     # ------------------------------------------------------------------
 
     async def _video_loop(self, reader: asyncio.StreamReader) -> None:
-        """Read H264/VP8 frames from FFmpeg stdout and dispatch to UDP."""
-        frame_buffer = bytearray()
-        packetize = (
-            packetize_h264_frame if self._codec == Codec.H264
-            else packetize_vp8_frame
-        )
-        # For H264, FFmpeg -f h264 outputs one NAL unit or Annex-B frame per read.
-        # We read in chunks and look for start codes to delimit frames.
-        CHUNK = 65536
+        """Read H264/VP8 frames from FFmpeg stdout and send as RTP."""
+        frame_start = time.monotonic()
+
+        if self._codec == Codec.H264:
+            h264_reader = H264FrameReader(reader)
+            try:
+                async for frame in h264_reader.frames():
+                    if self._stop_event.is_set():
+                        break
+                    while self._paused:
+                        await asyncio.sleep(0.01)
+
+                    nalus = split_nalus(frame)
+                    idr   = is_keyframe(nalus)
+                    payloads = h264_reader.packetize(frame)
+
+                    if payloads:
+                        await self._udp.send_video_packets(
+                            payloads,
+                            is_keyframe=idr,
+                            width=self._width,
+                            height=self._height,
+                        )
+
+                    # Pace to target fps using wall clock
+                    await self._pace_frame(frame_start)
+                    frame_start = time.monotonic()
+
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                log.error("H264 video loop error: %s", exc, exc_info=True)
+
+        elif self._codec == Codec.VP8:
+            await self._vp8_loop(reader)
+
+    async def _vp8_loop(self, reader: asyncio.StreamReader) -> None:
+        """Read VP8 IVF frames from FFmpeg stdout and send as RTP."""
+        frame_start = time.monotonic()
         try:
             while not self._stop_event.is_set():
-                if self._paused:
+                while self._paused:
                     await asyncio.sleep(0.01)
-                    continue
-                try:
-                    chunk = await asyncio.wait_for(reader.read(CHUNK), timeout=5.0)
-                except asyncio.TimeoutError:
-                    continue
-                if not chunk:
-                    break
-                frame_buffer.extend(chunk)
-
-                # Flush complete frames from the buffer
-                while True:
-                    frame, frame_buffer = _extract_frame(bytes(frame_buffer), self._codec)
-                    if frame is None:
-                        break
-                    payloads = packetize(frame)
-                    if payloads:
-                        await self._udp.send_video_packets(payloads)
-        except asyncio.CancelledError:
+                # IVF frame header: 4 bytes size, 8 bytes pts
+                hdr = await asyncio.wait_for(reader.readexactly(12), timeout=10.0)
+                frame_size = struct.unpack_from("<I", hdr, 0)[0]
+                frame = await reader.readexactly(frame_size)
+                payloads = packetize_vp8_frame(frame)
+                if payloads:
+                    await self._udp.send_video_packets(
+                        payloads,
+                        width=self._width,
+                        height=self._height,
+                    )
+                await self._pace_frame(frame_start)
+                frame_start = time.monotonic()
+        except (asyncio.CancelledError, asyncio.IncompleteReadError):
             pass
         except Exception as exc:
-            log.error("Video loop error: %s", exc)
+            log.error("VP8 video loop error: %s", exc, exc_info=True)
+
+    async def _pace_frame(self, frame_start: float) -> None:
+        """
+        Sleep for the remaining time in the current frame budget to achieve
+        the target fps without busy-looping.
+        """
+        elapsed = time.monotonic() - frame_start
+        remaining = self._frame_duration - elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    # ------------------------------------------------------------------
+    # Audio loop
+    # ------------------------------------------------------------------
 
     async def _audio_loop(self, reader: asyncio.StreamReader) -> None:
-        """Read Opus frames from FFmpeg stderr and dispatch to UDP."""
-        import struct
+        """Read length-prefixed Opus frames from FFmpeg stderr and send as RTP."""
+        FRAME_INTERVAL = 0.020  # 20 ms
         try:
             while not self._stop_event.is_set():
-                if self._paused:
+                while self._paused:
                     await asyncio.sleep(0.01)
-                    continue
                 try:
                     length_bytes = await asyncio.wait_for(
                         reader.readexactly(2), timeout=5.0
                     )
                 except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                     continue
+
                 (length,) = struct.unpack(">H", length_bytes)
                 if length == 0 or length > 4000:
+                    log.warning("Unexpected Opus frame length: %d — skipping", length)
                     continue
+
                 try:
                     frame = await reader.readexactly(length)
                 except asyncio.IncompleteReadError:
                     break
+
                 await self._udp.send_audio_frame(frame)
+
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            log.error("Audio loop error: %s", exc)
+            log.error("Audio loop error: %s", exc, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
     async def _cleanup(self) -> None:
-        """Kill FFmpeg and clean up."""
         if self._process and self._process.returncode is None:
             try:
                 self._process.kill()
@@ -198,48 +248,13 @@ class MediaPlayer:
         log.info("FFmpeg process cleaned up.")
 
 
-def _extract_frame(buf: bytes, codec: Codec) -> tuple[bytes | None, bytes]:
-    """
-    Try to extract one complete frame from *buf*.
-    Returns ``(frame_bytes, remaining_buffer)`` or ``(None, buf)`` if
-    no complete frame is available yet.
-
-    For H264 Annex-B: a new frame starts with 0x00000001 after the first one.
-    For VP8 IVF: each frame is length-prefixed in the IVF container.
-    """
-    from ..codecs.h264 import START_CODE_4, START_CODE_3
-
-    if codec == Codec.H264:
-        # Find second start code to delimit first frame
-        pos = buf.find(START_CODE_4, 4)
-        if pos == -1:
-            pos = buf.find(START_CODE_3, 4)
-        if pos == -1:
-            return None, buf  # incomplete
-        return buf[:pos], buf[pos:]
-
-    elif codec == Codec.VP8:
-        # IVF frame: 12-byte frame header, first 4 bytes = frame size
-        import struct
-        if len(buf) < 12:
-            return None, buf
-        frame_size = struct.unpack_from("<I", buf, 0)[0]
-        total = 12 + frame_size
-        if len(buf) < total:
-            return None, buf
-        return buf[12:total], buf[total:]
-
-    return None, buf
-
-
-# ──────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # VideoPlayer — public-facing player with events
-# ──────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class VideoPlayer:
     """
-    High-level player wrapping :class:`MediaPlayer` with events and playback
-    controls.
+    High-level player with events and playback controls.
 
     Usage::
 
@@ -260,28 +275,26 @@ class VideoPlayer:
         codec: Codec = Codec.H264,
         resolution: str = "720p",
         fps: int = 30,
+        video_bitrate: str = "2M",
+        audio_bitrate: str = "128k",
     ) -> None:
         from ..enums import Resolution
         res = Resolution(resolution)
         width, height = res.dimensions()
 
         self._player = MediaPlayer(
-            source,
-            udp,
+            source, udp,
             codec=codec,
-            width=width,
-            height=height,
+            width=width, height=height,
             fps=fps,
+            video_bitrate=video_bitrate,
+            audio_bitrate=audio_bitrate,
         )
         self._callbacks: dict[str, list[EventCallback]] = defaultdict(list)
 
-    # ------------------------------------------------------------------
-    # Event system
-    # ------------------------------------------------------------------
-
     def on(self, event: str) -> Callable[[EventCallback], EventCallback]:
         """
-        Decorator to register an async callback for *event*.
+        Register an async callback for *event*.
 
         Supported events: ``"start"``, ``"finish"``, ``"error"``, ``"progress"``.
         """
@@ -295,14 +308,10 @@ class VideoPlayer:
             try:
                 await cb(*args)
             except Exception as exc:
-                log.error("Error in %r event callback: %s", event, exc)
-
-    # ------------------------------------------------------------------
-    # Playback controls (delegate to MediaPlayer)
-    # ------------------------------------------------------------------
+                log.error("Error in %r callback: %s", event, exc)
 
     async def play(self) -> None:
-        """Start playback. Fires ``start`` and ``finish`` events."""
+        """Start playback. Fires ``start`` then ``finish`` events."""
         await self._emit("start")
         try:
             await self._player.play()
@@ -312,18 +321,9 @@ class VideoPlayer:
         else:
             await self._emit("finish")
 
-    def pause(self) -> None:
-        """Pause playback."""
-        self._player.pause()
-
-    def resume(self) -> None:
-        """Resume playback."""
-        self._player.resume()
-
-    def stop(self) -> None:
-        """Stop playback."""
-        self._player.stop()
+    def pause(self)  -> None: self._player.pause()
+    def resume(self) -> None: self._player.resume()
+    def stop(self)   -> None: self._player.stop()
 
     async def seek(self, seconds: float) -> None:
-        """Seek to *seconds* (restarts FFmpeg)."""
         await self._player.seek(seconds)
