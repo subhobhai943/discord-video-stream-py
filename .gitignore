@@ -27,8 +27,6 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script run during a build
-#  process that installs PyInstaller so that later clean-up can be done.
 *.manifest
 *.spec
 
@@ -82,16 +80,12 @@ ipython_config.py
 .python-version
 
 # pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, if you're executing a setup.py script or pip install -e ., you might want to ignore it.
 #Pipfile.lock
 
 # poetry
-#   Similar to Pipfile.lock, poetry.lock is generally tracked in version control.
 #poetry.lock
 
 # pdm
-#   Similar to Pipfile.lock, pdm.lock is generally tracked in version control
 #pdm.lock
 .pdm.toml
 .pdm-plugins/
@@ -144,3 +138,6 @@ cython_debug/
 *.swo
 *~
 .DS_Store
+
+# Downloaded binaries (fetched at runtime by _bootstrap.py)
+discord_video_stream/bin/
