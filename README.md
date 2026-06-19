@@ -1,4 +1,8 @@
-# discord-video-stream-py
+<p align="center">
+  <img src="docs/images/logo.jpg" alt="discord-video-stream-py Logo" width="220"/>
+</p>
+
+<h1 align="center">discord-video-stream-py</h1>
 
 > **Stream video and audio directly into Discord voice channels (Go Live / webcam) using Python. No Node.js required.**
 
@@ -28,17 +32,10 @@ Inspired by the TypeScript [`@dank074/discord-video-stream`](https://github.com/
 ## System Requirements
 
 - Python 3.10+
-- `ffmpeg` with libopus + libx264/libvpx compiled in:
-  ```bash
-  # Ubuntu/Debian
-  sudo apt install ffmpeg
+- (Optional) `ffmpeg` and `yt-dlp` installed in your system PATH.
 
-  # macOS
-  brew install ffmpeg
-
-  # Windows
-  # Download from https://ffmpeg.org/download.html and add to PATH
-  ```
+> [!NOTE]
+> **Zero Setup Required:** The library automatically downloads and bundles cross-platform static binaries for `ffmpeg` and `yt-dlp` (supporting Windows x64, Linux x64/arm64, and macOS Intel/Apple Silicon). The library will fall back to your system's `ffmpeg` or `yt-dlp` if the bundled binaries are not found.
 
 ---
 
@@ -171,6 +168,12 @@ High-level media player with events.
 discord_video_stream/
 ├── __init__.py          # Public API: Streamer, VideoPlayer, enums
 ├── streamer.py          # Main entry point — wraps discord.py-self client
+├── bin/                 # Bundled cross-platform binaries (FFmpeg & yt-dlp)
+│   ├── windows-x64/
+│   ├── linux-x64/
+│   ├── linux-arm64/
+│   ├── macos-x64/
+│   └── macos-arm64/
 ├── voice/
 │   ├── gateway.py       # Voice WebSocket (all OPs, heartbeat, resume)
 │   ├── udp.py           # MediaUdp — UDP socket, RTP dispatch, keepalive
@@ -185,7 +188,8 @@ discord_video_stream/
 │   ├── ffmpeg.py        # FFmpeg subprocess builder (H264/VP8/Opus)
 │   └── ytdlp.py         # yt-dlp URL resolver
 └── utils/
-    └── ssrc.py          # SSRC generation + video/RTX offsets
+    ├── ssrc.py          # SSRC generation + video/RTX offsets
+    └── binaries.py      # Cross-platform binary helper/resolver
 ```
 
 ---

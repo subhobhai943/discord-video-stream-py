@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
+from ..utils.binaries import get_ffmpeg_path
 from typing import NamedTuple
 
 from ..enums import Codec, Resolution
@@ -88,13 +88,7 @@ async def spawn_ffmpeg(
         If > 0, passed as ``-ss`` *before* ``-i`` for fast input seeking.
         Value is in seconds (e.g. 90.5 for 1 min 30.5 s).
     """
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if ffmpeg_bin is None:
-        raise RuntimeError(
-            "ffmpeg not found in PATH. "
-            "Install it with: sudo apt install ffmpeg  (Linux) "
-            "or: brew install ffmpeg  (macOS)"
-        )
+    ffmpeg_bin = get_ffmpeg_path()
 
     video_encoder, video_format = _codec_args(codec)
     scale_filter = f"scale={width}:{height}" if width and height else "scale=iw:ih"

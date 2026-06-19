@@ -1,0 +1,38 @@
+name: Download and Push Binaries
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run at 00:00 on the first day of every month to keep binaries updated
+    - cron: '0 0 1 * *'
+
+jobs:
+  download-binaries:
+    name: Download Cross-Platform Binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download and Extract Binaries
+        run: python scripts/download_binaries.py
+
+      - name: Commit and Push Binaries
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add discord_video_stream/bin/
+          if git diff --cached --quiet; then
+            echo "No changes in binaries detected. Skipping commit."
+          else
+            git commit -m "chore: update bundled cross-platform ffmpeg and yt-dlp binaries [skip ci]"
+            git push
+          fi

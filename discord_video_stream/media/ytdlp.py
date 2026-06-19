@@ -8,8 +8,11 @@ HTTP stream URLs or local files through unchanged).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Optional
+
+from ..utils.binaries import get_ytdlp_path
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +40,34 @@ async def resolve_url(url: str, *, prefer_format: str = "bestvideo+bestaudio/bes
         return url
 
     log.info("Resolving URL via yt-dlp: %s", url)
+
+    # 1. Try using the bundled/system binary first
+    ytdlp_bin = get_ytdlp_path()
+    if ytdlp_bin:
+        try:
+            cmd = [ytdlp_bin, "-j", "-f", prefer_format, url]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                info = json.loads(stdout.decode("utf-8", errors="ignore"))
+                direct_url = info.get("url") or info.get("manifest_url") or url
+                log.debug("Resolved to: %s", direct_url[:80])
+                return direct_url
+            else:
+                err_msg = stderr.decode("utf-8", errors="ignore").strip()
+                log.warning(
+                    "yt-dlp binary failed (exit code %d): %s. Falling back to python module.",
+                    proc.returncode,
+                    err_msg
+                )
+        except Exception as exc:
+            log.warning("yt-dlp binary execution failed: %s. Falling back to python module.", exc)
+
+    # 2. Fallback to python module
     try:
         import yt_dlp  # type: ignore[import-untyped]
     except ImportError:
