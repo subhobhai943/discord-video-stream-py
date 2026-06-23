@@ -5,6 +5,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.1.1] — 2026-06-24
+
+### Fixed
+- **`ytdlp.py` — Cookie authentication support** — `resolve_url()` now reads
+  `YTDLP_COOKIES_FILE` (default `cookies.txt`) and `YTDLP_BROWSER` environment
+  variables and passes them to both the yt-dlp binary (via `--cookies` /
+  `--cookies-from-browser` CLI flags) and the Python module (via `cookiefile` /
+  `cookiesfrombrowser` opts). Fixes YouTube bot-detection errors
+  (`Sign in to confirm you're not a bot`) when streaming YouTube videos.
+- **`ytdlp.py` — Default format selector updated** — changed from
+  `bestvideo+bestaudio/best` to `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best`
+  to ensure FFmpeg always receives a compatible combined mp4 stream.
+
+---
+
 ## [Unreleased]
 
 ### Phase 2 — H264 Video Streaming (Go Live)

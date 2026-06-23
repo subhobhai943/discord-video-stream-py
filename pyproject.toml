@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "discord-video-stream-py"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stream video and audio into Discord voice channels (Go Live / webcam) using Python."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -27,9 +27,6 @@ dependencies = [
     "discord.py-self>=2.0",
     "PyNaCl>=1.5",
     "cryptography>=41.0",
-    # yt-dlp pip package: used for Python-level URL extraction API.
-    # The standalone yt-dlp binary is also downloaded lazily by _bootstrap.py
-    # for direct subprocess calls.
     "yt-dlp>=2024.1.0",
     "websockets>=12.0",
 ]
