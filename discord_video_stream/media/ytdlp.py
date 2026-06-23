@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Optional
 
 from ..utils.binaries import get_ytdlp_path
@@ -17,7 +18,29 @@ from ..utils.binaries import get_ytdlp_path
 log = logging.getLogger(__name__)
 
 
-async def resolve_url(url: str, *, prefer_format: str = "bestvideo+bestaudio/best") -> str:
+def _cookies_args() -> list[str]:
+    """Return extra yt-dlp CLI args for cookie auth, if available."""
+    cookies_file = os.getenv("YTDLP_COOKIES_FILE", "cookies.txt")
+    if os.path.isfile(cookies_file):
+        return ["--cookies", cookies_file]
+    browser = os.getenv("YTDLP_BROWSER", "")
+    if browser:
+        return ["--cookies-from-browser", browser]
+    return []
+
+
+def _cookies_opts() -> dict:
+    """Return extra yt-dlp Python-module opts for cookie auth, if available."""
+    cookies_file = os.getenv("YTDLP_COOKIES_FILE", "cookies.txt")
+    if os.path.isfile(cookies_file):
+        return {"cookiefile": cookies_file}
+    browser = os.getenv("YTDLP_BROWSER", "")
+    if browser:
+        return {"cookiesfrombrowser": (browser,)}
+    return {}
+
+
+async def resolve_url(url: str, *, prefer_format: str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best") -> str:
     """
     Resolve an online URL to a direct stream URL using yt-dlp.
 
@@ -45,7 +68,7 @@ async def resolve_url(url: str, *, prefer_format: str = "bestvideo+bestaudio/bes
     ytdlp_bin = get_ytdlp_path()
     if ytdlp_bin:
         try:
-            cmd = [ytdlp_bin, "-j", "-f", prefer_format, url]
+            cmd = [ytdlp_bin, "-j", "-f", prefer_format] + _cookies_args() + [url]
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -79,6 +102,7 @@ async def resolve_url(url: str, *, prefer_format: str = "bestvideo+bestaudio/bes
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
+        **_cookies_opts(),
     }
 
     loop = asyncio.get_event_loop()
@@ -88,7 +112,6 @@ async def resolve_url(url: str, *, prefer_format: str = "bestvideo+bestaudio/bes
         log.error("yt-dlp failed for %s: %s", url, exc)
         return url
 
-    # For combined formats, yt-dlp returns a single direct URL
     direct_url = info.get("url") or info.get("manifest_url") or url
     log.debug("Resolved to: %s", direct_url[:80])
     return direct_url
@@ -102,15 +125,12 @@ def _extract(url: str, opts: dict) -> dict:
 
 def _is_local_or_direct(url: str) -> bool:
     """Return True if the string looks like a local path or a direct media URL."""
-    import os
     if os.path.exists(url):
         return True
-    # Direct file extensions that don’t need yt-dlp
     direct_exts = (".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".ts", ".m3u8")
     lower = url.lower()
     if any(lower.endswith(ext) for ext in direct_exts):
         return True
-    # Direct stream URLs (RTMP, RTSP, HLS already resolved)
     if lower.startswith(("rtmp://", "rtmps://", "rtsp://")):
         return True
     return False
